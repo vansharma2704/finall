@@ -152,7 +152,7 @@ export class ARApp {
         this.reticle.matrix.fromArray(pose.transform.matrix);
 
         // Perform space check
-        const xrCamera = this.renderer.xr.getCamera();
+        const xrCamera = this.renderer.xr.getCamera(this.camera);
         const spaceResult = checkSpace(this.reticle, this.machineData, xrCamera);
         this.isSpaceValid = spaceResult.valid;
         this.lastSpaceCheckReason = spaceResult.reason || "";

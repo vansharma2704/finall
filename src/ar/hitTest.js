@@ -21,6 +21,11 @@ export function checkSpace(reticle, machineData, camera) {
     return { valid: false, reason: "Scanning for flat surface..." };
   }
 
+  // Safety fallback if tracking camera is not ready
+  if (!camera) {
+    return { valid: false, reason: "Initializing tracking camera..." };
+  }
+
   // Decompose reticle matrix to get position and orientation
   const reticlePosition = new THREE.Vector3();
   const reticleQuaternion = new THREE.Quaternion();
