@@ -144,7 +144,8 @@ export class ARApp {
         this.reticle.matrix.fromArray(pose.transform.matrix);
 
         // Perform space check
-        const spaceResult = checkSpace(this.reticle, this.machineData, this.camera);
+        const xrCamera = this.renderer.xr.getCamera();
+        const spaceResult = checkSpace(this.reticle, this.machineData, xrCamera);
         this.isSpaceValid = spaceResult.valid;
         this.lastSpaceCheckReason = spaceResult.reason || "";
 
@@ -194,21 +195,34 @@ export class ARApp {
       (model) => {
         this.placedModel = model;
 
+        // Reset scale/rotation to calculate true dimensions
+        this.placedModel.scale.set(1, 1, 1);
+        this.placedModel.rotation.set(0, 0, 0);
+
+        const box = new THREE.Box3().setFromObject(this.placedModel);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+
+        const targetHeight = this.machineData.height / 1000; // in meters
+        let scaleFactor = 1.0;
+        if (size.y > 0) {
+          scaleFactor = targetHeight / size.y;
+        }
+        this.placedModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
+
         // Position model exactly on the floor hit point
         this.placedModel.position.copy(position);
 
         // Orient model to face the camera (user) horizontally
+        const xrCamera = this.renderer.xr.getCamera();
         const cameraPosition = new THREE.Vector3();
-        this.camera.getWorldPosition(cameraPosition);
+        xrCamera.getWorldPosition(cameraPosition);
         const toCamera = new THREE.Vector3().subVectors(cameraPosition, position);
         toCamera.y = 0; // lock to horizontal plane
         toCamera.normalize();
 
         const angle = Math.atan2(toCamera.x, toCamera.z);
         this.placedModel.rotation.set(0, angle, 0);
-
-        // Lock scale to original real-world size
-        this.placedModel.scale.set(1, 1, 1);
 
         this.scene.add(this.placedModel);
 

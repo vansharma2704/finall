@@ -19,6 +19,7 @@ export function initScene(container) {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Limit ratio to 2 for performance
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
+  renderer.xr.setReferenceSpaceType("local-floor");
 
   // Shadow Map Settings
   renderer.shadowMap.enabled = true;
