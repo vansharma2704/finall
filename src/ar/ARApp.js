@@ -135,17 +135,19 @@ export class ARApp {
   tick(timestamp, frame) {
     if (!frame) return;
 
-    // Capture the current camera position from the tracking loop
-    const xrCamera = this.renderer.xr.getCamera(this.camera);
-    if (xrCamera) {
-      if (!this.lastCameraPosition) {
-        this.lastCameraPosition = new THREE.Vector3();
-      }
-      // Get the first eye camera position if available, otherwise parent ArrayCamera
-      if (xrCamera.cameras && xrCamera.cameras.length > 0) {
-        xrCamera.cameras[0].getWorldPosition(this.lastCameraPosition);
-      } else {
-        xrCamera.getWorldPosition(this.lastCameraPosition);
+    // Capture the current camera position from the tracking loop using the WebXR frame pose
+    const referenceSpace = this.renderer.xr.getReferenceSpace();
+    if (referenceSpace) {
+      const viewerPose = frame.getViewerPose(referenceSpace);
+      if (viewerPose) {
+        if (!this.lastCameraPosition) {
+          this.lastCameraPosition = new THREE.Vector3();
+        }
+        this.lastCameraPosition.set(
+          viewerPose.transform.position.x,
+          viewerPose.transform.position.y,
+          viewerPose.transform.position.z
+        );
       }
     }
 
@@ -219,7 +221,7 @@ export class ARApp {
         this.placedModel.position.set(0, 0, 0);
         this.placedModel.updateMatrixWorld(true);
 
-        const box = new THREE.Box3().setFromObject(this.placedModel);
+        const box = getVisualBoundingBox(this.placedModel);
         const size = new THREE.Vector3();
         box.getSize(size);
 
@@ -240,7 +242,7 @@ export class ARApp {
         this.placedModel.updateMatrixWorld(true);
 
         // Calculate bounding box again after scaling to find the bottom offset relative to the pivot
-        const scaledBox = new THREE.Box3().setFromObject(this.placedModel);
+        const scaledBox = getVisualBoundingBox(this.placedModel);
 
         // Position model exactly on the floor hit point
         this.placedModel.position.copy(position);
@@ -401,4 +403,47 @@ export class ARApp {
       this.onRemoved();
     }
   }
+}
+
+function getVisualBoundingBox(object) {
+  const box = new THREE.Box3();
+  let hasVisualMesh = false;
+
+  object.traverse((child) => {
+    if (child.isMesh) {
+      const name = child.name.toLowerCase();
+      if (
+        name.includes("helper") ||
+        name.includes("collider") ||
+        name.includes("floor") ||
+        name.includes("ground") ||
+        name.includes("plane") ||
+        name.includes("shadow")
+      ) {
+        return;
+      }
+
+      if (child.material) {
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        const isInvisible = mats.every((m) => m.visible === false || m.opacity === 0);
+        if (isInvisible) return;
+      }
+
+      if (!child.geometry.boundingBox) {
+        child.geometry.computeBoundingBox();
+      }
+      
+      const localBox = child.geometry.boundingBox.clone();
+      child.updateWorldMatrix(true, false);
+      localBox.applyMatrix4(child.matrixWorld);
+      box.union(localBox);
+      hasVisualMesh = true;
+    }
+  });
+
+  if (!hasVisualMesh) {
+    box.setFromObject(object);
+  }
+
+  return box;
 }
