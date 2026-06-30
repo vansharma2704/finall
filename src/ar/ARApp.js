@@ -141,7 +141,12 @@ export class ARApp {
       if (!this.lastCameraPosition) {
         this.lastCameraPosition = new THREE.Vector3();
       }
-      xrCamera.getWorldPosition(this.lastCameraPosition);
+      // Get the first eye camera position if available, otherwise parent ArrayCamera
+      if (xrCamera.cameras && xrCamera.cameras.length > 0) {
+        xrCamera.cameras[0].getWorldPosition(this.lastCameraPosition);
+      } else {
+        xrCamera.getWorldPosition(this.lastCameraPosition);
+      }
     }
 
     // Only update hit test if nothing is placed yet and model is not loading
@@ -205,9 +210,14 @@ export class ARApp {
       (model) => {
         this.placedModel = model;
 
-        // Reset scale/rotation to calculate true dimensions
+        // Add to scene first so that world matrices can be computed correctly
+        this.scene.add(this.placedModel);
+
+        // Reset scale/rotation/position to calculate true original dimensions
         this.placedModel.scale.set(1, 1, 1);
         this.placedModel.rotation.set(0, 0, 0);
+        this.placedModel.position.set(0, 0, 0);
+        this.placedModel.updateMatrixWorld(true);
 
         const box = new THREE.Box3().setFromObject(this.placedModel);
         const size = new THREE.Vector3();
@@ -222,11 +232,12 @@ export class ARApp {
         let scaleY = 1.0;
         let scaleZ = 1.0;
 
-        if (size.x > 0) scaleX = targetWidth / size.x;
-        if (size.y > 0) scaleY = targetHeight / size.y;
-        if (size.z > 0) scaleZ = targetDepth / size.z;
+        if (size.x > 0.001) scaleX = targetWidth / size.x;
+        if (size.y > 0.001) scaleY = targetHeight / size.y;
+        if (size.z > 0.001) scaleZ = targetDepth / size.z;
 
         this.placedModel.scale.set(scaleX, scaleY, scaleZ);
+        this.placedModel.updateMatrixWorld(true);
 
         // Calculate bounding box again after scaling to find the bottom offset relative to the pivot
         const scaledBox = new THREE.Box3().setFromObject(this.placedModel);
@@ -234,18 +245,23 @@ export class ARApp {
         // Position model exactly on the floor hit point
         this.placedModel.position.copy(position);
         // Adjust Y so the bottom of the model rests exactly on the floor
-        this.placedModel.position.y -= scaledBox.min.y;
+        this.placedModel.position.y -= (scaledBox.min.y - this.placedModel.position.y);
+        this.placedModel.updateMatrixWorld(true);
 
         // Orient model to face the camera (user) horizontally using cached position
-        const cameraPosition = this.lastCameraPosition || new THREE.Vector3(0, 1.6, 0);
+        const cameraPosition = new THREE.Vector3();
+        if (this.lastCameraPosition) {
+          cameraPosition.copy(this.lastCameraPosition);
+        } else {
+          cameraPosition.set(0, 1.6, 0);
+        }
         const toCamera = new THREE.Vector3().subVectors(cameraPosition, position);
         toCamera.y = 0; // lock to horizontal plane
         toCamera.normalize();
 
         const angle = Math.atan2(toCamera.x, toCamera.z);
         this.placedModel.rotation.set(0, angle, 0);
-
-        this.scene.add(this.placedModel);
+        this.placedModel.updateMatrixWorld(true);
 
         // Place shadow plane exactly under the model
         this.shadowPlane.position.copy(position);
