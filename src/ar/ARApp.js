@@ -43,6 +43,10 @@ export class ARApp {
     this.lastCameraPosition = new THREE.Vector3(0, 1.6, 0);
 
     this.onSelectBind = this.onSelect.bind(this);
+
+    this.anchor = null;
+    this.shouldCreateAnchor = false;
+    this.modelLocalMinY = 0;
     this.onWindowResizeBind = this.onWindowResize.bind(this);
   }
 
@@ -87,9 +91,10 @@ export class ARApp {
       this.groundOutline.visible = false;
       this.scene.add(this.groundOutline);
 
-      // 4. Start WebXR AR Session
+      // 4. Start WebXR AR Session with anchors and local-floor as optional features
       const sessionInit = {
         requiredFeatures: ["hit-test", "local"],
+        optionalFeatures: ["anchors", "local-floor"]
       };
 
       this.session = await startAR(this.renderer, sessionInit);
@@ -206,6 +211,47 @@ export class ARApp {
       }
     }
 
+    // 1. Handle WebXR Anchor creation inside the animation frame loop
+    if (this.shouldCreateAnchor && this.session && this.hitTestSource) {
+      const hitTestResults = frame.getHitTestResults(this.hitTestSource);
+      if (hitTestResults.length > 0) {
+        const hitResult = hitTestResults[0];
+        if (hitResult.createAnchor) {
+          hitResult.createAnchor().then((anchor) => {
+            this.anchor = anchor;
+            console.log("WebXR Anchor created successfully!");
+          }).catch((err) => {
+            console.warn("Failed to create WebXR Anchor:", err);
+          });
+        }
+      }
+      this.shouldCreateAnchor = false;
+    }
+
+    // 2. Keep the placed model locked to the WebXR Anchor if available
+    if (this.isPlaced && this.placedModel && this.anchor && referenceSpace) {
+      const anchorPose = frame.getPose(this.anchor.anchorSpace, referenceSpace);
+      if (anchorPose) {
+        const matrix = new THREE.Matrix4().fromArray(anchorPose.transform.matrix);
+        const position = new THREE.Vector3();
+        const quaternion = new THREE.Quaternion();
+        const scale = new THREE.Vector3();
+        matrix.decompose(position, quaternion, scale);
+
+        // Update placed model position to sit exactly on top of the 2cm pedestal
+        this.placedModel.position.copy(position);
+        this.placedModel.position.y += (0.02 - this.modelLocalMinY);
+        this.placedModel.quaternion.copy(quaternion);
+        this.placedModel.updateMatrixWorld(true);
+
+        // Update ground base and outline positions to follow the anchor
+        if (this.groundBase && this.groundOutline) {
+          this.groundBase.position.set(position.x, position.y + 0.01, position.z);
+          this.groundOutline.position.set(position.x, position.y + 0.02, position.z);
+        }
+      }
+    }
+
     // Render scene
     this.renderer.render(this.scene, this.camera);
   }
@@ -232,6 +278,8 @@ export class ARApp {
     const quaternion = new THREE.Quaternion();
     const scale = new THREE.Vector3();
     this.reticle.matrix.decompose(position, quaternion, scale);
+
+    this.shouldCreateAnchor = true; // Signal visual anchor creation in tick loop
 
     loadMachine(
       this.machineData.model,
@@ -263,6 +311,7 @@ export class ARApp {
 
         // Calculate bounding box again after scaling to find the bottom offset relative to the pivot
         const scaledBox = getVisualBoundingBox(this.placedModel);
+        this.modelLocalMinY = scaledBox.min.y;
 
         // Position model exactly on the solid ground top (2cm above floor)
         this.placedModel.position.copy(position);
@@ -357,6 +406,8 @@ export class ARApp {
     this.shadowPlane.visible = false;
     if (this.groundBase) this.groundBase.visible = false;
     if (this.groundOutline) this.groundOutline.visible = false;
+    this.anchor = null;
+    this.shouldCreateAnchor = false;
     this.isPlaced = false;
     this.isSpaceValid = false;
     this.lastSpaceCheckReason = "Scanning for flat surface...";
