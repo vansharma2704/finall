@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #111;
+  color: white;
+  font-family: Arial, sans-serif;
+}
+
+.app {
+  min-height: 100vh;
+}
+
+.header {
+  height: 60px;
+  background: #1c1c1c;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 20px;
+}
+
+.content {
+  display: flex;
+  height: 65vh;
+}
+
+.sidebar {
+  width: 220px;
+  background: #1e1e1e;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.sidebar button,
+.action-bar button,
+.header button {
+  padding: 10px;
+  cursor: pointer;
+}
+
+.info-panel {
+  background: #1c1c1c;
+  padding: 20px;
+}
+
+.action-bar {
+  display: flex;
+  justify-content: center;
+  padding: 20px;
+}
