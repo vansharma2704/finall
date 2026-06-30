@@ -21,20 +21,19 @@ export function initScene(container) {
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
 
-  // CRITICAL: Set reference space BEFORE setSession is called.
-  // "local-floor" gives us a floor-calibrated coordinate system where Y=0 is the physical floor.
-  renderer.xr.setReferenceSpaceType("local-floor");
+  // Use "local" reference space — universally supported and stable on Android ARCore.
+  // Hit-test already gives floor-level Y coordinates, so local-floor is not required.
+  renderer.xr.setReferenceSpaceType("local");
 
-  // Disable shadow maps entirely for smooth mobile AR performance
+  // No shadow maps — saves a full GPU pass per frame on mobile
   renderer.shadowMap.enabled = false;
 
-  // Realistic Color & Contrast
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.1;
 
   container.appendChild(renderer.domElement);
 
-  // Soft environmental/hemisphere light (ambient skylight + ground reflection)
+  // Hemisphere light for ambient illumination
   const hemiLight = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1.2);
   scene.add(hemiLight);
 

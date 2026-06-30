@@ -1,19 +1,20 @@
 import * as THREE from "three";
 import { initScene } from "./initScene";
 import { startAR } from "./startAR";
-import { initHitTest, getHitPose, checkSpace } from "./hitTest";
+import { initHitTest, getHitPose } from "./hitTest";
 import { createReticle } from "./reticle";
 import { loadMachine } from "./loadMachine";
 
 /**
- * ARApp — Custom WebXR AR engine for placing a 3D machine on the floor.
+ * ARApp — Production WebXR AR engine.
  *
- * DESIGN PRINCIPLES:
- * 1. The model is placed ONCE and NEVER touched again in the render loop.
- * 2. matrixAutoUpdate = false freezes the model's world matrix.
- * 3. The camera moves freely; the model stays stationary.
- * 4. No per-frame position.copy, scale.set, lookAt, or quaternion updates on the model.
- * 5. Background preloading ensures instant placement on tap.
+ * ARCHITECTURE:
+ * - Model is placed once on tap using the hit-test surface position.
+ * - A WebXR Anchor is created at the placement point for drift correction.
+ * - If anchors are supported, the model follows the anchor (which is physically fixed).
+ * - If anchors are NOT supported, the model is frozen at the initial position.
+ * - Scale is computed once and never changed.
+ * - The camera moves independently; the model stays in physical space.
  */
 export class ARApp {
   constructor({
@@ -52,26 +53,28 @@ export class ARApp {
     this.onSelectBind = this.onSelect.bind(this);
     this.onWindowResizeBind = this.onWindowResize.bind(this);
 
+    // Anchor tracking
+    this.anchor = null;
+    this.modelYOffset = 0;         // Vertical offset from anchor to model bottom
+    this.modelScaleFactor = 1.0;   // Stored scale (set once, never changed)
+    this.modelQuaternion = new THREE.Quaternion(); // Stored orientation (set once)
+    this.hasAnchors = false;       // Whether WebXR anchors are available
+
     // Preloading state
     this.preloadedModel = null;
     this.preLoadError = null;
     this.isPreloaded = false;
-
-    // Reusable vectors for hit-test (avoids per-frame GC allocations)
-    this._reticlePos = new THREE.Vector3();
-    this._reticleQuat = new THREE.Quaternion();
-    this._reticleScale = new THREE.Vector3();
   }
 
   async start() {
     try {
-      // 1. Initialize Scene, Camera, Renderer (sets local-floor reference space)
+      // 1. Initialize Scene, Camera, Renderer
       const sceneData = initScene(this.container);
       this.scene = sceneData.scene;
       this.camera = sceneData.camera;
       this.renderer = sceneData.renderer;
 
-      // 2. Set up lighting
+      // 2. Set up lighting (no shadows)
       this.setupLighting();
 
       // 3. Create Reticle
@@ -80,15 +83,15 @@ export class ARApp {
 
       // 4. Start WebXR AR Session
       const sessionInit = {
-        requiredFeatures: ["hit-test", "local-floor"],
-        optionalFeatures: ["anchors"],
+        requiredFeatures: ["hit-test"],
+        optionalFeatures: ["anchors", "local-floor"],
       };
       this.session = await startAR(this.renderer, sessionInit);
 
-      // Listen for tap gesture
+      // Listen for tap
       this.session.addEventListener("select", this.onSelectBind);
 
-      // Handle session termination
+      // Handle session end
       this.session.addEventListener("end", () => {
         this.destroy();
       });
@@ -96,101 +99,105 @@ export class ARApp {
       // 5. Initialize Hit Test
       this.hitTestSource = await initHitTest(this.session);
 
-      // 6. Handle Window Resizing
+      // 6. Handle Resize
       window.addEventListener("resize", this.onWindowResizeBind);
 
-      // 7. Start the XR animation render loop
-      this.renderer.setAnimationLoop((timestamp, frame) =>
-        this.tick(timestamp, frame)
-      );
+      // 7. Start render loop
+      this.renderer.setAnimationLoop((ts, frame) => this.tick(ts, frame));
 
-      // 8. Background-preload the machine model immediately
+      // 8. Background-preload the machine model
       this._startPreload();
     } catch (error) {
       console.error("Failed to start WebXR AR:", error);
       if (this.onError) {
         this.onError(
-          error.message || "Failed to initialize WebXR immersive AR session."
+          error.message || "Failed to initialize WebXR AR session."
         );
       }
       this.destroy();
     }
   }
 
-  // ─── Lighting ────────────────────────────────────────────────────────────────
+  // ─── Lighting ───────────────────────────────────────────────────────────────
 
   setupLighting() {
-    // Simple directional light (no shadows for performance)
     this.dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
     this.dirLight.position.set(1.5, 4.0, 1.5);
     this.scene.add(this.dirLight);
 
-    // Complementary ambient fill light
     this.ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
     this.scene.add(this.ambientLight);
   }
 
-  // ─── Render Loop (tick) ──────────────────────────────────────────────────────
+  // ─── Render Loop ────────────────────────────────────────────────────────────
   //
-  // CRITICAL: This function NEVER modifies the placed model's position, rotation,
-  // scale, or matrix. It only:
-  //   a) Updates the reticle position from hit-test (before placement)
-  //   b) Calls renderer.render()
+  // Before placement: update reticle from hit-test
+  // After placement with anchor: update model position from anchor (physical lock)
+  // After placement without anchor: do nothing (frozen transform)
 
   tick(timestamp, frame) {
     if (!frame) return;
 
-    // Only update hit test reticle BEFORE placement
-    if (this.session && this.hitTestSource && !this.isPlaced && !this.isLoading) {
-      const referenceSpace = this.renderer.xr.getReferenceSpace();
-      if (referenceSpace) {
-        const pose = getHitPose(frame, this.hitTestSource, referenceSpace);
+    const refSpace = this.renderer.xr.getReferenceSpace();
 
-        if (pose) {
-          this.reticle.visible = true;
-          this.reticle.matrix.fromArray(pose.transform.matrix);
+    // ── Pre-placement: reticle tracking ──
+    if (!this.isPlaced && !this.isLoading && this.hitTestSource && refSpace) {
+      const pose = getHitPose(frame, this.hitTestSource, refSpace);
 
-          // Space check using reusable vectors (no allocation per frame)
-          this.reticle.matrix.decompose(
-            this._reticlePos,
-            this._reticleQuat,
-            this._reticleScale
-          );
+      if (pose) {
+        this.reticle.visible = true;
+        this.reticle.matrix.fromArray(pose.transform.matrix);
 
-          // Simple surface normal check (avoid expensive camera-based distance check)
-          const normal = new THREE.Vector3(0, 1, 0).applyQuaternion(
-            this._reticleQuat
-          );
-          if (normal.y < 0.95) {
-            this.isSpaceValid = false;
-            this.lastSpaceCheckReason = "Surface is not flat enough.";
-          } else {
-            this.isSpaceValid = true;
-            this.lastSpaceCheckReason = "";
-          }
-
-          if (this.onSpaceStatus) {
-            this.onSpaceStatus(this.isSpaceValid, this.lastSpaceCheckReason);
-          }
-        } else {
-          this.reticle.visible = false;
+        // Simple surface normal check for flatness
+        const m = this.reticle.matrix;
+        // Normal Y component is matrix element [5] (2nd column, 2nd row)
+        const normalY = m.elements[5];
+        if (normalY < 0.95) {
           this.isSpaceValid = false;
-          this.lastSpaceCheckReason = "Scanning for flat surface...";
+          this.lastSpaceCheckReason = "Surface is not flat enough.";
+        } else {
+          this.isSpaceValid = true;
+          this.lastSpaceCheckReason = "";
+        }
 
-          if (this.onSpaceStatus) {
-            this.onSpaceStatus(false, this.lastSpaceCheckReason);
-          }
+        if (this.onSpaceStatus) {
+          this.onSpaceStatus(this.isSpaceValid, this.lastSpaceCheckReason);
+        }
+      } else {
+        this.reticle.visible = false;
+        this.isSpaceValid = false;
+        this.lastSpaceCheckReason = "Scanning for flat surface...";
+        if (this.onSpaceStatus) {
+          this.onSpaceStatus(false, this.lastSpaceCheckReason);
         }
       }
     }
 
-    // *** NO model position/scale/rotation updates here — ever ***
+    // ── Try to create anchor (must happen inside an active XR frame) ──
+    if (this._pendingAnchor) {
+      this._tryCreateAnchor(frame);
+    }
+    // ── Post-placement: anchor-based drift correction ──
+    if (this.isPlaced && this.placedModel && this.anchor && refSpace) {
+      try {
+        const anchorPose = frame.getPose(this.anchor.anchorSpace, refSpace);
+        if (anchorPose) {
+          const p = anchorPose.transform.position;
+          // Update ONLY position from anchor (scale and rotation are frozen)
+          this.placedModel.position.set(p.x, p.y + this.modelYOffset, p.z);
+          this.placedModel.updateMatrix();
+          this.placedModel.updateMatrixWorld(true);
+        }
+      } catch (e) {
+        // Anchor lost — model stays at last known position
+      }
+    }
 
-    // Render scene
+    // Render
     this.renderer.render(this.scene, this.camera);
   }
 
-  // ─── Placement (onSelect) ────────────────────────────────────────────────────
+  // ─── Placement ──────────────────────────────────────────────────────────────
 
   onSelect() {
     if (this.isPlaced || this.isLoading) return;
@@ -210,59 +217,66 @@ export class ARApp {
       this.onSpaceStatus(false, "Placing machine...");
     }
 
-    // Capture placement transform from the reticle AT THIS MOMENT
+    // Capture placement position & orientation from reticle
     const placementPos = new THREE.Vector3();
     const placementQuat = new THREE.Quaternion();
     const placementScale = new THREE.Vector3();
     this.reticle.matrix.decompose(placementPos, placementQuat, placementScale);
 
-    // Place the model
+    // Store orientation (used once, never changed)
+    this.modelQuaternion.copy(placementQuat);
+
+    // Try to create a WebXR anchor at this position
+    this._createAnchorFromHitTest();
+
+    // Place model function
     const doPlace = (model) => {
       this.placedModel = model;
-
-      // 1. Add to scene at origin to compute bounding box
       this.scene.add(this.placedModel);
+
+      // Reset to measure original dimensions
       this.placedModel.scale.set(1, 1, 1);
       this.placedModel.rotation.set(0, 0, 0);
       this.placedModel.position.set(0, 0, 0);
       this.placedModel.updateMatrixWorld(true);
 
-      // 2. Measure the visual bounding box
+      // Measure visual bounding box
       const box = getVisualBoundingBox(this.placedModel);
       const size = new THREE.Vector3();
       box.getSize(size);
 
-      // 3. Uniform scale to match real-world height (mm → meters)
+      // Compute uniform scale (height-based, mm → meters)
       const targetHeight = this.machineData.height / 1000;
-      let scaleFactor = 1.0;
-      if (size.y > 0.001) {
-        scaleFactor = targetHeight / size.y;
+      this.modelScaleFactor = size.y > 0.001 ? targetHeight / size.y : 1.0;
+
+      // Apply scale ONCE
+      this.placedModel.scale.setScalar(this.modelScaleFactor);
+      this.placedModel.updateMatrixWorld(true);
+
+      // Get bottom offset after scaling
+      const scaledBox = getVisualBoundingBox(this.placedModel);
+      this.modelYOffset = -scaledBox.min.y;
+
+      // Position on floor hit point
+      this.placedModel.position.copy(placementPos);
+      this.placedModel.position.y += this.modelYOffset;
+
+      // Orient to surface
+      this.placedModel.quaternion.copy(this.modelQuaternion);
+
+      // Finalize matrix
+      this.placedModel.updateMatrix();
+      this.placedModel.updateMatrixWorld(true);
+
+      // If no anchors, freeze transform completely
+      if (!this.hasAnchors) {
+        this.placedModel.matrixAutoUpdate = false;
+        this.placedModel.traverse((child) => {
+          child.matrixAutoUpdate = false;
+        });
       }
 
-      // 4. Apply scale ONCE
-      this.placedModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
-      this.placedModel.updateMatrixWorld(true);
-
-      // 5. Get bottom offset after scaling
-      const scaledBox = getVisualBoundingBox(this.placedModel);
-
-      // 6. Position ONCE — sit bottom of model on the floor hit point
-      this.placedModel.position.copy(placementPos);
-      this.placedModel.position.y -= scaledBox.min.y;
-
-      // 7. Orient ONCE — use the reticle's yaw
-      this.placedModel.quaternion.copy(placementQuat);
-
-      // 8. Compute final world matrix
-      this.placedModel.updateMatrixWorld(true);
-
-      // 9. FREEZE — never touch this model's transform again
-      this.placedModel.matrixAutoUpdate = false;
-      this.placedModel.traverse((child) => {
-        child.matrixAutoUpdate = false;
-      });
-
-      // 10. Position directional light near the model
+      // Point light at model
       this.dirLight.target = this.placedModel;
       this.dirLight.position.set(
         placementPos.x + 1.5,
@@ -270,7 +284,6 @@ export class ARApp {
         placementPos.z + 1.5
       );
 
-      // 11. Done
       this.isPlaced = true;
       this.isLoading = false;
 
@@ -282,7 +295,7 @@ export class ARApp {
       }
     };
 
-    // Use preloaded model if ready, otherwise wait
+    // Use preloaded model if ready
     if (this.isPreloaded && this.preloadedModel) {
       doPlace(this.preloadedModel);
     } else if (this.preLoadError) {
@@ -294,7 +307,7 @@ export class ARApp {
         );
       }
     } else {
-      // Model still downloading — poll until ready
+      // Model still downloading — poll
       if (this.onSpaceStatus) {
         this.onSpaceStatus(false, "Downloading machine model...");
       }
@@ -316,7 +329,46 @@ export class ARApp {
     }
   }
 
-  // ─── Preloading ──────────────────────────────────────────────────────────────
+  // ─── Anchor Creation ────────────────────────────────────────────────────────
+
+  _createAnchorFromHitTest() {
+    // Will be executed in the next frame when hit test results are available
+    this._pendingAnchor = true;
+  }
+
+  // Called from tick() to create anchor within an active XR frame
+  _tryCreateAnchor(frame) {
+    if (!this._pendingAnchor || !this.hitTestSource) return;
+    this._pendingAnchor = false;
+
+    try {
+      const refSpace = this.renderer.xr.getReferenceSpace();
+      const results = frame.getHitTestResults(this.hitTestSource);
+      if (results.length > 0 && results[0].createAnchor) {
+        results[0]
+          .createAnchor()
+          .then((anchor) => {
+            this.anchor = anchor;
+            this.hasAnchors = true;
+            console.log("WebXR Anchor created — model is physically locked.");
+
+            // Now that we have an anchor, enable matrixAutoUpdate so anchor
+            // pose updates are reflected
+            if (this.placedModel) {
+              this.placedModel.matrixAutoUpdate = true;
+            }
+          })
+          .catch(() => {
+            console.warn("Anchors not available — using fixed position.");
+            this.hasAnchors = false;
+          });
+      }
+    } catch (e) {
+      this.hasAnchors = false;
+    }
+  }
+
+  // ─── Preloading ─────────────────────────────────────────────────────────────
 
   _startPreload() {
     this.preloadedModel = null;
@@ -328,7 +380,7 @@ export class ARApp {
       (model) => {
         this.preloadedModel = model;
         this.isPreloaded = true;
-        console.log("Machine model preloaded successfully.");
+        console.log("Machine model preloaded.");
       },
       (progress) => {
         if (this.onLoadingProgress && !this.isPlaced) {
@@ -337,19 +389,18 @@ export class ARApp {
       },
       (err) => {
         this.preLoadError = err;
-        console.error("Failed to preload machine model:", err);
+        console.error("Failed to preload:", err);
       }
     );
   }
 
-  // ─── Remove Machine ─────────────────────────────────────────────────────────
+  // ─── Remove Machine ────────────────────────────────────────────────────────
 
   removeMachine() {
     if (!this.isPlaced || !this.placedModel) return;
 
     this.scene.remove(this.placedModel);
 
-    // Dispose geometry, materials, and textures
     this.placedModel.traverse((child) => {
       if (child.isMesh) {
         if (child.geometry) child.geometry.dispose();
@@ -360,7 +411,11 @@ export class ARApp {
           mats.forEach((mat) => {
             for (const key of Object.keys(mat)) {
               const prop = mat[key];
-              if (prop && typeof prop.dispose === "function" && prop.isTexture) {
+              if (
+                prop &&
+                typeof prop.dispose === "function" &&
+                prop.isTexture
+              ) {
                 prop.dispose();
               }
             }
@@ -371,11 +426,12 @@ export class ARApp {
     });
 
     this.placedModel = null;
+    this.anchor = null;
+    this.hasAnchors = false;
     this.isPlaced = false;
     this.isSpaceValid = false;
     this.lastSpaceCheckReason = "Scanning for flat surface...";
 
-    // Re-preload for next placement
     this._startPreload();
 
     if (this.onRemoved) {
@@ -383,7 +439,7 @@ export class ARApp {
     }
   }
 
-  // ─── Utility ─────────────────────────────────────────────────────────────────
+  // ─── Utility ────────────────────────────────────────────────────────────────
 
   onWindowResize() {
     if (this.camera && this.renderer) {
@@ -441,47 +497,46 @@ export class ARApp {
   }
 }
 
-// ─── Helper: Visual Bounding Box ─────────────────────────────────────────────
+// ─── Helper ───────────────────────────────────────────────────────────────────
 
 function getVisualBoundingBox(object) {
   const box = new THREE.Box3();
-  let hasVisualMesh = false;
+  let found = false;
 
   object.traverse((child) => {
-    if (child.isMesh) {
-      const name = (child.name || "").toLowerCase();
-      if (
-        name.includes("helper") ||
-        name.includes("collider") ||
-        name.includes("floor") ||
-        name.includes("ground") ||
-        name.includes("plane") ||
-        name.includes("shadow")
-      ) {
-        return;
-      }
+    if (!child.isMesh || !child.geometry) return;
 
-      if (child.material) {
-        const mats = Array.isArray(child.material)
-          ? child.material
-          : [child.material];
-        if (mats.every((m) => m.visible === false || m.opacity === 0)) return;
-      }
-
-      if (!child.geometry) return;
-      if (!child.geometry.boundingBox) {
-        child.geometry.computeBoundingBox();
-      }
-
-      const localBox = child.geometry.boundingBox.clone();
-      child.updateWorldMatrix(true, false);
-      localBox.applyMatrix4(child.matrixWorld);
-      box.union(localBox);
-      hasVisualMesh = true;
+    const name = (child.name || "").toLowerCase();
+    if (
+      name.includes("helper") ||
+      name.includes("collider") ||
+      name.includes("floor") ||
+      name.includes("ground") ||
+      name.includes("plane") ||
+      name.includes("shadow")
+    ) {
+      return;
     }
+
+    if (child.material) {
+      const mats = Array.isArray(child.material)
+        ? child.material
+        : [child.material];
+      if (mats.every((m) => m.visible === false || m.opacity === 0)) return;
+    }
+
+    if (!child.geometry.boundingBox) {
+      child.geometry.computeBoundingBox();
+    }
+
+    const lb = child.geometry.boundingBox.clone();
+    child.updateWorldMatrix(true, false);
+    lb.applyMatrix4(child.matrixWorld);
+    box.union(lb);
+    found = true;
   });
 
-  if (!hasVisualMesh) {
+  if (!found) {
     box.setFromObject(object);
   }
 

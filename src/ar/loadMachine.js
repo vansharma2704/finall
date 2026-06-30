@@ -1,24 +1,32 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
+
+// Create a shared DRACO loader instance (reused across all loads)
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.7/");
+dracoLoader.setDecoderConfig({ type: "js" });
+
+// Create a shared GLTF loader with DRACO support
+const gltfLoader = new GLTFLoader();
+gltfLoader.setDRACOLoader(dracoLoader);
 
 export function loadMachine(modelUrl, onLoad, onProgress, onError) {
-  const loader = new GLTFLoader();
-
-  loader.load(
+  gltfLoader.load(
     modelUrl,
     (gltf) => {
       const model = gltf.scene;
 
-      // Enable casting and receiving shadows on all parts of the model
       model.traverse((child) => {
         if (child.isMesh) {
-          child.castShadow = true;
-          child.receiveShadow = true;
+          child.castShadow = false;
+          child.receiveShadow = false;
+
+          // Disable frustum culling to prevent disappearing when looking away
+          child.frustumCulled = false;
 
           if (child.material) {
-            // Apply double-sided shadows to prevent light leaks on thin meshes
             child.material.shadowSide = THREE.DoubleSide;
-            // Retain material details but ensure roughness yields natural highlights
             if (child.material.roughness !== undefined) {
               child.material.roughness = Math.max(child.material.roughness, 0.15);
             }
@@ -33,12 +41,11 @@ export function loadMachine(modelUrl, onLoad, onProgress, onError) {
         const percent = (xhr.loaded / xhr.total) * 100;
         onProgress(percent);
       } else if (onProgress) {
-        // Fallback for chunked transfer-encoding where total is 0
         onProgress(50);
       }
     },
     (error) => {
-      console.error("Error loading GLTF model in WebXR:", error);
+      console.error("Error loading GLTF model:", error);
       if (onError) onError(error);
     }
   );
