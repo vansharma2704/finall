@@ -61,6 +61,31 @@ export class ARApp {
       this.reticle = createReticle();
       this.scene.add(this.reticle);
 
+      // Create visible ground base helper (default radius 1.0)
+      const groundGeometry = new THREE.RingGeometry(0, 1.0, 32);
+      groundGeometry.rotateX(-Math.PI / 2);
+      const groundMaterial = new THREE.MeshBasicMaterial({
+        color: 0x06b6d4, // Cyan-500
+        transparent: true,
+        opacity: 0.15,
+        side: THREE.DoubleSide
+      });
+      this.groundBase = new THREE.Mesh(groundGeometry, groundMaterial);
+      this.groundBase.visible = false;
+      this.scene.add(this.groundBase);
+
+      const outlineGeometry = new THREE.RingGeometry(0.98, 1.0, 32);
+      outlineGeometry.rotateX(-Math.PI / 2);
+      const outlineMaterial = new THREE.MeshBasicMaterial({
+        color: 0x06b6d4,
+        transparent: true,
+        opacity: 0.5,
+        side: THREE.DoubleSide
+      });
+      this.groundOutline = new THREE.Mesh(outlineGeometry, outlineMaterial);
+      this.groundOutline.visible = false;
+      this.scene.add(this.groundOutline);
+
       // 4. Start WebXR AR Session
       const sessionInit = {
         requiredFeatures: ["hit-test", "local"],
@@ -270,6 +295,22 @@ export class ARApp {
         this.shadowPlane.position.y += 0.001; // Prevent z-fighting
         this.shadowPlane.visible = true;
 
+        // Place the ground base and outline exactly under the model
+        if (this.groundBase && this.groundOutline) {
+          const diagonal = Math.sqrt(this.machineData.width * this.machineData.width + this.machineData.depth * this.machineData.depth) / 1000;
+          const radius = (diagonal / 2) + 0.05; // 5cm margin
+
+          this.groundBase.scale.set(radius, radius, radius);
+          this.groundBase.position.copy(position);
+          this.groundBase.position.y += 0.002; // prevent z-fighting
+          this.groundBase.visible = true;
+
+          this.groundOutline.scale.set(radius, radius, radius);
+          this.groundOutline.position.copy(position);
+          this.groundOutline.position.y += 0.0025; // prevent z-fighting
+          this.groundOutline.visible = true;
+        }
+
         // Position shadow-casting light target onto placed model
         this.dirLight.target = this.placedModel;
         this.dirLight.position.set(position.x + 1.5, position.y + 4.0, position.z + 1.5);
@@ -322,6 +363,8 @@ export class ARApp {
 
     this.placedModel = null;
     this.shadowPlane.visible = false;
+    if (this.groundBase) this.groundBase.visible = false;
+    if (this.groundOutline) this.groundOutline.visible = false;
     this.isPlaced = false;
     this.isSpaceValid = false;
     this.lastSpaceCheckReason = "Scanning for flat surface...";
