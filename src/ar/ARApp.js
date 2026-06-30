@@ -247,7 +247,7 @@ export class ARApp {
         // Position model exactly on the floor hit point
         this.placedModel.position.copy(position);
         // Adjust Y so the bottom of the model rests exactly on the floor
-        this.placedModel.position.y -= (scaledBox.min.y - this.placedModel.position.y);
+        this.placedModel.position.y -= scaledBox.min.y;
         this.placedModel.updateMatrixWorld(true);
 
         // Orient model to face the camera (user) horizontally using cached position
