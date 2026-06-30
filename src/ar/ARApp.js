@@ -40,8 +40,6 @@ export class ARApp {
     this.isSpaceValid = false;
     this.lastSpaceCheckReason = "Scanning for flat surface...";
 
-    this.lastCameraPosition = new THREE.Vector3(0, 1.6, 0);
-
     this.onSelectBind = this.onSelect.bind(this);
 
     this.anchor = null;
@@ -65,31 +63,7 @@ export class ARApp {
       this.reticle = createReticle();
       this.scene.add(this.reticle);
 
-      // Create visible 3D solid ground base helper (default radius 1.0, thickness 0.02)
-      const baseGeometry = new THREE.CylinderGeometry(1.0, 1.0, 0.02, 32);
-      const baseMaterial = new THREE.MeshStandardMaterial({
-        color: 0x18181b, // Zinc-900 (dark charcoal grey)
-        roughness: 0.4,
-        metalness: 0.8,
-        transparent: true,
-        opacity: 0.95
-      });
-      this.groundBase = new THREE.Mesh(baseGeometry, baseMaterial);
-      this.groundBase.castShadow = true;
-      this.groundBase.receiveShadow = true;
-      this.groundBase.visible = false;
-      this.scene.add(this.groundBase);
-
-      // Glowing top border outline (default radius 1.005, thickness 0.005)
-      const borderGeometry = new THREE.CylinderGeometry(1.005, 1.005, 0.005, 32);
-      const borderMaterial = new THREE.MeshBasicMaterial({
-        color: 0x06b6d4, // Cyan glow
-        transparent: true,
-        opacity: 0.8
-      });
-      this.groundOutline = new THREE.Mesh(borderGeometry, borderMaterial);
-      this.groundOutline.visible = false;
-      this.scene.add(this.groundOutline);
+      // Ground base cylinder and outline are disabled per user request
 
       // 4. Start WebXR AR Session with anchors and local-floor as optional features
       const sessionInit = {
@@ -166,21 +140,7 @@ export class ARApp {
   tick(timestamp, frame) {
     if (!frame) return;
 
-    // Capture the current camera position from the tracking loop using the WebXR frame pose
-    const referenceSpace = this.renderer.xr.getReferenceSpace();
-    if (referenceSpace) {
-      const viewerPose = frame.getViewerPose(referenceSpace);
-      if (viewerPose) {
-        if (!this.lastCameraPosition) {
-          this.lastCameraPosition = new THREE.Vector3();
-        }
-        this.lastCameraPosition.set(
-          viewerPose.transform.position.x,
-          viewerPose.transform.position.y,
-          viewerPose.transform.position.z
-        );
-      }
-    }
+    // No camera position tracking per strict requirements
 
     // Only update hit test if nothing is placed yet and model is not loading
     if (this.session && this.hitTestSource && !this.isPlaced && !this.isLoading) {
@@ -238,17 +198,11 @@ export class ARApp {
         const scale = new THREE.Vector3();
         matrix.decompose(position, quaternion, scale);
 
-        // Update placed model position to sit exactly on top of the 2cm pedestal
+        // Update placed model position to sit exactly on the floor hit point
         this.placedModel.position.copy(position);
-        this.placedModel.position.y += (0.02 - this.modelLocalMinY);
+        this.placedModel.position.y -= this.modelLocalMinY;
         this.placedModel.quaternion.copy(quaternion);
         this.placedModel.updateMatrixWorld(true);
-
-        // Update ground base and outline positions to follow the anchor
-        if (this.groundBase && this.groundOutline) {
-          this.groundBase.position.set(position.x, position.y + 0.01, position.z);
-          this.groundOutline.position.set(position.x, position.y + 0.02, position.z);
-        }
       }
     }
 
@@ -313,44 +267,23 @@ export class ARApp {
         const scaledBox = getVisualBoundingBox(this.placedModel);
         this.modelLocalMinY = scaledBox.min.y;
 
-        // Position model exactly on the solid ground top (2cm above floor)
+        // Position model exactly on the floor hit point
         this.placedModel.position.copy(position);
-        this.placedModel.position.y += (0.02 - scaledBox.min.y);
+        this.placedModel.position.y -= scaledBox.min.y;
+        
+        // Orient the model flat on the surface using the reticle's yaw quaternion
+        this.placedModel.quaternion.copy(quaternion);
         this.placedModel.updateMatrixWorld(true);
 
-        // Orient model to face the camera (user) horizontally using cached position
-        const cameraPosition = new THREE.Vector3();
-        if (this.lastCameraPosition) {
-          cameraPosition.copy(this.lastCameraPosition);
-        } else {
-          cameraPosition.set(0, 1.6, 0);
-        }
-        const toCamera = new THREE.Vector3().subVectors(cameraPosition, position);
-        toCamera.y = 0; // lock to horizontal plane
-        toCamera.normalize();
-
-        const angle = Math.atan2(toCamera.x, toCamera.z);
-        this.placedModel.rotation.set(0, angle, 0);
-        this.placedModel.updateMatrixWorld(true);
+        // Freeze the transform completely!
+        this.placedModel.matrixAutoUpdate = false;
 
         // Place shadow plane exactly under the model
         this.shadowPlane.position.copy(position);
         this.shadowPlane.position.y += 0.001; // Prevent z-fighting
         this.shadowPlane.visible = true;
 
-        // Place the ground base and outline exactly under the model
-        if (this.groundBase && this.groundOutline) {
-          const diagonal = Math.sqrt(this.machineData.width * this.machineData.width + this.machineData.depth * this.machineData.depth) / 1000;
-          const radius = (diagonal / 2) + 0.05; // 5cm margin
-
-          this.groundBase.scale.set(radius, 1.0, radius); // scale radius but keep thickness 0.02
-          this.groundBase.position.set(position.x, position.y + 0.01, position.z); // center at 1cm height (so bottom is at 0 and top is at 2cm)
-          this.groundBase.visible = true;
-
-          this.groundOutline.scale.set(radius, 1.0, radius); // scale radius but keep thickness 0.005
-          this.groundOutline.position.set(position.x, position.y + 0.02, position.z); // place at top edge (2cm height)
-          this.groundOutline.visible = true;
-        }
+        // Ground base is disabled per user request
 
         // Position shadow-casting light target onto placed model
         this.dirLight.target = this.placedModel;
@@ -404,8 +337,6 @@ export class ARApp {
 
     this.placedModel = null;
     this.shadowPlane.visible = false;
-    if (this.groundBase) this.groundBase.visible = false;
-    if (this.groundOutline) this.groundOutline.visible = false;
     this.anchor = null;
     this.shouldCreateAnchor = false;
     this.isPlaced = false;
