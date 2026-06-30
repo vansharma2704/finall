@@ -251,20 +251,14 @@ export class ARApp {
         const size = new THREE.Vector3();
         box.getSize(size);
 
-        // Calculate exact non-uniform scaling to match target dimensions in meters
-        const targetWidth = this.machineData.width / 1000;
+        // Calculate uniform scale factor to match the real-world height (in meters) without distortion
         const targetHeight = this.machineData.height / 1000;
-        const targetDepth = this.machineData.depth / 1000;
+        let scaleFactor = 1.0;
+        if (size.y > 0.001) {
+          scaleFactor = targetHeight / size.y;
+        }
 
-        let scaleX = 1.0;
-        let scaleY = 1.0;
-        let scaleZ = 1.0;
-
-        if (size.x > 0.001) scaleX = targetWidth / size.x;
-        if (size.y > 0.001) scaleY = targetHeight / size.y;
-        if (size.z > 0.001) scaleZ = targetDepth / size.z;
-
-        this.placedModel.scale.set(scaleX, scaleY, scaleZ);
+        this.placedModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
         this.placedModel.updateMatrixWorld(true);
 
         // Calculate bounding box again after scaling to find the bottom offset relative to the pivot
