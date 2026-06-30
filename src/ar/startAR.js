@@ -11,24 +11,24 @@ export async function startAR(renderer, sessionInit = {}) {
   // Request the session
   const session = await navigator.xr.requestSession("immersive-ar", sessionInit);
   
-  // Set the session on Three.js WebXRManager
-  await renderer.xr.setSession(session);
-
-  // Retrieve and set reference space with fallback to ensure stationary tracking
-  let referenceSpace = null;
+  // Determine reference space type supported by this session and set it on Three.js WebXRManager
+  let referenceSpaceType = "local";
   try {
-    referenceSpace = await session.requestReferenceSpace("local-floor");
+    await session.requestReferenceSpace("local-floor");
+    referenceSpaceType = "local-floor";
   } catch (e) {
     try {
-      referenceSpace = await session.requestReferenceSpace("local");
+      await session.requestReferenceSpace("local");
+      referenceSpaceType = "local";
     } catch (e2) {
-      referenceSpace = await session.requestReferenceSpace("viewer");
+      referenceSpaceType = "viewer";
     }
   }
 
-  if (referenceSpace) {
-    renderer.xr.setReferenceSpace(referenceSpace);
-  }
+  renderer.xr.setReferenceSpaceType(referenceSpaceType);
+
+  // Set the session on Three.js WebXRManager
+  await renderer.xr.setSession(session);
 
   return session;
 }

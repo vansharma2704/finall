@@ -40,6 +40,8 @@ export class ARApp {
     this.isSpaceValid = false;
     this.lastSpaceCheckReason = "Scanning for flat surface...";
 
+    this.lastCameraPosition = new THREE.Vector3(0, 1.6, 0);
+
     this.onSelectBind = this.onSelect.bind(this);
     this.onWindowResizeBind = this.onWindowResize.bind(this);
   }
@@ -134,6 +136,15 @@ export class ARApp {
   tick(timestamp, frame) {
     if (!frame) return;
 
+    // Capture the current camera position from the tracking loop
+    const xrCamera = this.renderer.xr.getCamera(this.camera);
+    if (xrCamera) {
+      if (!this.lastCameraPosition) {
+        this.lastCameraPosition = new THREE.Vector3();
+      }
+      xrCamera.getWorldPosition(this.lastCameraPosition);
+    }
+
     // Only update hit test if nothing is placed yet and model is not loading
     if (this.session && this.hitTestSource && !this.isPlaced && !this.isLoading) {
       const referenceSpace = this.renderer.xr.getReferenceSpace();
@@ -218,10 +229,8 @@ export class ARApp {
         // Adjust Y so the bottom of the model rests exactly on the floor
         this.placedModel.position.y -= scaledBox.min.y;
 
-        // Orient model to face the camera (user) horizontally
-        const xrCamera = this.renderer.xr.getCamera();
-        const cameraPosition = new THREE.Vector3();
-        xrCamera.getWorldPosition(cameraPosition);
+        // Orient model to face the camera (user) horizontally using cached position
+        const cameraPosition = this.lastCameraPosition || new THREE.Vector3(0, 1.6, 0);
         const toCamera = new THREE.Vector3().subVectors(cameraPosition, position);
         toCamera.y = 0; // lock to horizontal plane
         toCamera.normalize();
