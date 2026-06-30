@@ -105,9 +105,9 @@ export class ARApp {
     this.dirLight.position.set(1.5, 4.0, 1.5);
     this.dirLight.castShadow = true;
 
-    // High quality soft shadows settings
-    this.dirLight.shadow.mapSize.width = 1024;
-    this.dirLight.shadow.mapSize.height = 1024;
+    // High quality soft shadows settings (512x512 for optimal mobile frame rate)
+    this.dirLight.shadow.mapSize.width = 512;
+    this.dirLight.shadow.mapSize.height = 512;
     this.dirLight.shadow.camera.near = 0.1;
     this.dirLight.shadow.camera.far = 8.0;
 

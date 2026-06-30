@@ -58,7 +58,7 @@ function ARViewer() {
 
       arApp.start();
       setArAppInstance(arApp);
-    }, 150);
+    }, 500);
 
     return () => {
       clearTimeout(timer);

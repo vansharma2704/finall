@@ -12,12 +12,12 @@ export function initScene(container) {
   scene.add(camera);
 
   const renderer = new THREE.WebGLRenderer({
-    antialias: true,
+    antialias: false,
     alpha: true,
-    preserveDrawingBuffer: true,
+    powerPreference: "high-performance",
   });
 
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Limit ratio to 2 for performance
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); // Limit ratio to 1.5 for stable mobile frame rates
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
   renderer.xr.setReferenceSpaceType("local");
