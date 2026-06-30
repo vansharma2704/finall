@@ -61,28 +61,29 @@ export class ARApp {
       this.reticle = createReticle();
       this.scene.add(this.reticle);
 
-      // Create visible ground base helper (default radius 1.0)
-      const groundGeometry = new THREE.RingGeometry(0, 1.0, 32);
-      groundGeometry.rotateX(-Math.PI / 2);
-      const groundMaterial = new THREE.MeshBasicMaterial({
-        color: 0x06b6d4, // Cyan-500
+      // Create visible 3D solid ground base helper (default radius 1.0, thickness 0.02)
+      const baseGeometry = new THREE.CylinderGeometry(1.0, 1.0, 0.02, 32);
+      const baseMaterial = new THREE.MeshStandardMaterial({
+        color: 0x18181b, // Zinc-900 (dark charcoal grey)
+        roughness: 0.4,
+        metalness: 0.8,
         transparent: true,
-        opacity: 0.15,
-        side: THREE.DoubleSide
+        opacity: 0.95
       });
-      this.groundBase = new THREE.Mesh(groundGeometry, groundMaterial);
+      this.groundBase = new THREE.Mesh(baseGeometry, baseMaterial);
+      this.groundBase.castShadow = true;
+      this.groundBase.receiveShadow = true;
       this.groundBase.visible = false;
       this.scene.add(this.groundBase);
 
-      const outlineGeometry = new THREE.RingGeometry(0.98, 1.0, 32);
-      outlineGeometry.rotateX(-Math.PI / 2);
-      const outlineMaterial = new THREE.MeshBasicMaterial({
-        color: 0x06b6d4,
+      // Glowing top border outline (default radius 1.005, thickness 0.005)
+      const borderGeometry = new THREE.CylinderGeometry(1.005, 1.005, 0.005, 32);
+      const borderMaterial = new THREE.MeshBasicMaterial({
+        color: 0x06b6d4, // Cyan glow
         transparent: true,
-        opacity: 0.5,
-        side: THREE.DoubleSide
+        opacity: 0.8
       });
-      this.groundOutline = new THREE.Mesh(outlineGeometry, outlineMaterial);
+      this.groundOutline = new THREE.Mesh(borderGeometry, borderMaterial);
       this.groundOutline.visible = false;
       this.scene.add(this.groundOutline);
 
@@ -269,10 +270,9 @@ export class ARApp {
         // Calculate bounding box again after scaling to find the bottom offset relative to the pivot
         const scaledBox = getVisualBoundingBox(this.placedModel);
 
-        // Position model exactly on the floor hit point
+        // Position model exactly on the solid ground top (2cm above floor)
         this.placedModel.position.copy(position);
-        // Adjust Y so the bottom of the model rests exactly on the floor
-        this.placedModel.position.y -= scaledBox.min.y;
+        this.placedModel.position.y += (0.02 - scaledBox.min.y);
         this.placedModel.updateMatrixWorld(true);
 
         // Orient model to face the camera (user) horizontally using cached position
@@ -300,14 +300,12 @@ export class ARApp {
           const diagonal = Math.sqrt(this.machineData.width * this.machineData.width + this.machineData.depth * this.machineData.depth) / 1000;
           const radius = (diagonal / 2) + 0.05; // 5cm margin
 
-          this.groundBase.scale.set(radius, radius, radius);
-          this.groundBase.position.copy(position);
-          this.groundBase.position.y += 0.002; // prevent z-fighting
+          this.groundBase.scale.set(radius, 1.0, radius); // scale radius but keep thickness 0.02
+          this.groundBase.position.set(position.x, position.y + 0.01, position.z); // center at 1cm height (so bottom is at 0 and top is at 2cm)
           this.groundBase.visible = true;
 
-          this.groundOutline.scale.set(radius, radius, radius);
-          this.groundOutline.position.copy(position);
-          this.groundOutline.position.y += 0.0025; // prevent z-fighting
+          this.groundOutline.scale.set(radius, 1.0, radius); // scale radius but keep thickness 0.005
+          this.groundOutline.position.set(position.x, position.y + 0.02, position.z); // place at top edge (2cm height)
           this.groundOutline.visible = true;
         }
 
