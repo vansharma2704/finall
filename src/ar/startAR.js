@@ -8,26 +8,11 @@ export async function startAR(renderer, sessionInit = {}) {
     throw new Error("Immersive AR is not supported on this device/browser.");
   }
 
-  // Request the session
+  // Request the immersive-ar session
   const session = await navigator.xr.requestSession("immersive-ar", sessionInit);
-  
-  // Determine reference space type supported by this session and set it on Three.js WebXRManager
-  let referenceSpaceType = "local";
-  try {
-    await session.requestReferenceSpace("local-floor");
-    referenceSpaceType = "local-floor";
-  } catch (e) {
-    try {
-      await session.requestReferenceSpace("local");
-      referenceSpaceType = "local";
-    } catch (e2) {
-      referenceSpaceType = "viewer";
-    }
-  }
 
-  renderer.xr.setReferenceSpaceType(referenceSpaceType);
-
-  // Set the session on Three.js WebXRManager
+  // Bind session to Three.js WebXRManager.
+  // Reference space type was already set on renderer.xr in initScene.js.
   await renderer.xr.setSession(session);
 
   return session;

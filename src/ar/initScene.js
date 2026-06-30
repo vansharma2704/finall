@@ -17,14 +17,16 @@ export function initScene(container) {
     powerPreference: "high-performance",
   });
 
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); // Limit ratio to 1.5 for stable mobile frame rates
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
-  renderer.xr.setReferenceSpaceType("local");
 
-  // Shadow Map Settings
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // CRITICAL: Set reference space BEFORE setSession is called.
+  // "local-floor" gives us a floor-calibrated coordinate system where Y=0 is the physical floor.
+  renderer.xr.setReferenceSpaceType("local-floor");
+
+  // Disable shadow maps entirely for smooth mobile AR performance
+  renderer.shadowMap.enabled = false;
 
   // Realistic Color & Contrast
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -33,13 +35,8 @@ export function initScene(container) {
   container.appendChild(renderer.domElement);
 
   // Soft environmental/hemisphere light (ambient skylight + ground reflection)
-  const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1.2);
-  scene.add(light);
+  const hemiLight = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1.2);
+  scene.add(hemiLight);
 
-  // Return the main three.js components
-  return {
-    scene,
-    camera,
-    renderer,
-  };
+  return { scene, camera, renderer };
 }

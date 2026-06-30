@@ -5,6 +5,16 @@ import { initHitTest, getHitPose, checkSpace } from "./hitTest";
 import { createReticle } from "./reticle";
 import { loadMachine } from "./loadMachine";
 
+/**
+ * ARApp — Custom WebXR AR engine for placing a 3D machine on the floor.
+ *
+ * DESIGN PRINCIPLES:
+ * 1. The model is placed ONCE and NEVER touched again in the render loop.
+ * 2. matrixAutoUpdate = false freezes the model's world matrix.
+ * 3. The camera moves freely; the model stays stationary.
+ * 4. No per-frame position.copy, scale.set, lookAt, or quaternion updates on the model.
+ * 5. Background preloading ensures instant placement on tap.
+ */
 export class ARApp {
   constructor({
     container,
@@ -31,7 +41,6 @@ export class ARApp {
     this.hitTestSource = null;
     this.reticle = null;
     this.placedModel = null;
-    this.shadowPlane = null;
     this.dirLight = null;
     this.ambientLight = null;
 
@@ -41,42 +50,45 @@ export class ARApp {
     this.lastSpaceCheckReason = "Scanning for flat surface...";
 
     this.onSelectBind = this.onSelect.bind(this);
-
-    this.anchor = null;
-    this.shouldCreateAnchor = false;
-    this.modelLocalMinY = 0;
     this.onWindowResizeBind = this.onWindowResize.bind(this);
+
+    // Preloading state
+    this.preloadedModel = null;
+    this.preLoadError = null;
+    this.isPreloaded = false;
+
+    // Reusable vectors for hit-test (avoids per-frame GC allocations)
+    this._reticlePos = new THREE.Vector3();
+    this._reticleQuat = new THREE.Quaternion();
+    this._reticleScale = new THREE.Vector3();
   }
 
   async start() {
     try {
-      // 1. Initialize Scene, Camera, Renderer
+      // 1. Initialize Scene, Camera, Renderer (sets local-floor reference space)
       const sceneData = initScene(this.container);
       this.scene = sceneData.scene;
       this.camera = sceneData.camera;
       this.renderer = sceneData.renderer;
 
-      // 2. Set up realistic lighting and shadows
-      this.setupRealisticLighting();
+      // 2. Set up lighting
+      this.setupLighting();
 
       // 3. Create Reticle
       this.reticle = createReticle();
       this.scene.add(this.reticle);
 
-      // Ground base cylinder and outline are disabled per user request
-
-      // 4. Start WebXR AR Session with anchors and local-floor as optional features
+      // 4. Start WebXR AR Session
       const sessionInit = {
-        requiredFeatures: ["hit-test", "local"],
-        optionalFeatures: ["anchors", "local-floor"]
+        requiredFeatures: ["hit-test", "local-floor"],
+        optionalFeatures: ["anchors"],
       };
-
       this.session = await startAR(this.renderer, sessionInit);
 
-      // Listen for tap gesture (WebXR select event)
+      // Listen for tap gesture
       this.session.addEventListener("select", this.onSelectBind);
 
-      // Handle session termination (e.g., user exits AR or browser closes)
+      // Handle session termination
       this.session.addEventListener("end", () => {
         this.destroy();
       });
@@ -88,117 +100,106 @@ export class ARApp {
       window.addEventListener("resize", this.onWindowResizeBind);
 
       // 7. Start the XR animation render loop
-      this.renderer.setAnimationLoop((timestamp, frame) => this.tick(timestamp, frame));
+      this.renderer.setAnimationLoop((timestamp, frame) =>
+        this.tick(timestamp, frame)
+      );
 
+      // 8. Background-preload the machine model immediately
+      this._startPreload();
     } catch (error) {
-      console.error("Failed to start custom WebXR AR App:", error);
+      console.error("Failed to start WebXR AR:", error);
       if (this.onError) {
-        this.onError(error.message || "Failed to initialize WebXR immersive AR session.");
+        this.onError(
+          error.message || "Failed to initialize WebXR immersive AR session."
+        );
       }
       this.destroy();
     }
   }
 
-  setupRealisticLighting() {
-    // Directional light representing overhead room illumination
+  // ─── Lighting ────────────────────────────────────────────────────────────────
+
+  setupLighting() {
+    // Simple directional light (no shadows for performance)
     this.dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
     this.dirLight.position.set(1.5, 4.0, 1.5);
-    this.dirLight.castShadow = true;
-
-    // High quality soft shadows settings (512x512 for optimal mobile frame rate)
-    this.dirLight.shadow.mapSize.width = 512;
-    this.dirLight.shadow.mapSize.height = 512;
-    this.dirLight.shadow.camera.near = 0.1;
-    this.dirLight.shadow.camera.far = 8.0;
-
-    // Small orthographic frustum aligned with machine size
-    const d = 1.0;
-    this.dirLight.shadow.camera.left = -d;
-    this.dirLight.shadow.camera.right = d;
-    this.dirLight.shadow.camera.top = d;
-    this.dirLight.shadow.camera.bottom = -d;
-
-    // Bias to prevent self-shadowing artifacts
-    this.dirLight.shadow.bias = -0.0005;
     this.scene.add(this.dirLight);
 
     // Complementary ambient fill light
-    this.ambientLight = new THREE.AmbientLight(0xffffff, 0.35);
+    this.ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
     this.scene.add(this.ambientLight);
-
-    // Dynamic shadow plane to blend shadow with actual floor
-    const shadowPlaneGeometry = new THREE.PlaneGeometry(6, 6);
-    shadowPlaneGeometry.rotateX(-Math.PI / 2);
-    const shadowPlaneMaterial = new THREE.ShadowMaterial({ opacity: 0.45 });
-    this.shadowPlane = new THREE.Mesh(shadowPlaneGeometry, shadowPlaneMaterial);
-    this.shadowPlane.receiveShadow = true;
-    this.shadowPlane.position.set(0, 0, 0);
-    this.shadowPlane.visible = false;
-    this.scene.add(this.shadowPlane);
   }
+
+  // ─── Render Loop (tick) ──────────────────────────────────────────────────────
+  //
+  // CRITICAL: This function NEVER modifies the placed model's position, rotation,
+  // scale, or matrix. It only:
+  //   a) Updates the reticle position from hit-test (before placement)
+  //   b) Calls renderer.render()
 
   tick(timestamp, frame) {
     if (!frame) return;
 
-    // No camera position tracking per strict requirements
-
-    // Only update hit test if nothing is placed yet and model is not loading
+    // Only update hit test reticle BEFORE placement
     if (this.session && this.hitTestSource && !this.isPlaced && !this.isLoading) {
       const referenceSpace = this.renderer.xr.getReferenceSpace();
-      const pose = getHitPose(frame, this.hitTestSource, referenceSpace);
+      if (referenceSpace) {
+        const pose = getHitPose(frame, this.hitTestSource, referenceSpace);
 
-      if (pose) {
-        this.reticle.visible = true;
-        this.reticle.matrix.fromArray(pose.transform.matrix);
+        if (pose) {
+          this.reticle.visible = true;
+          this.reticle.matrix.fromArray(pose.transform.matrix);
 
-        // Perform space check
-        const xrCamera = this.renderer.xr.getCamera(this.camera);
-        const spaceResult = checkSpace(this.reticle, this.machineData, xrCamera);
-        this.isSpaceValid = spaceResult.valid;
-        this.lastSpaceCheckReason = spaceResult.reason || "";
+          // Space check using reusable vectors (no allocation per frame)
+          this.reticle.matrix.decompose(
+            this._reticlePos,
+            this._reticleQuat,
+            this._reticleScale
+          );
 
-        if (this.onSpaceStatus) {
-          this.onSpaceStatus(this.isSpaceValid, this.lastSpaceCheckReason);
-        }
-      } else {
-        this.reticle.visible = false;
-        this.isSpaceValid = false;
-        this.lastSpaceCheckReason = "Scanning for flat surface...";
+          // Simple surface normal check (avoid expensive camera-based distance check)
+          const normal = new THREE.Vector3(0, 1, 0).applyQuaternion(
+            this._reticleQuat
+          );
+          if (normal.y < 0.95) {
+            this.isSpaceValid = false;
+            this.lastSpaceCheckReason = "Surface is not flat enough.";
+          } else {
+            this.isSpaceValid = true;
+            this.lastSpaceCheckReason = "";
+          }
 
-        if (this.onSpaceStatus) {
-          this.onSpaceStatus(false, this.lastSpaceCheckReason);
+          if (this.onSpaceStatus) {
+            this.onSpaceStatus(this.isSpaceValid, this.lastSpaceCheckReason);
+          }
+        } else {
+          this.reticle.visible = false;
+          this.isSpaceValid = false;
+          this.lastSpaceCheckReason = "Scanning for flat surface...";
+
+          if (this.onSpaceStatus) {
+            this.onSpaceStatus(false, this.lastSpaceCheckReason);
+          }
         }
       }
     }
 
-    // 1. Handle WebXR Anchor creation inside the animation frame loop
-    if (this.shouldCreateAnchor && this.session && this.hitTestSource) {
-      const hitTestResults = frame.getHitTestResults(this.hitTestSource);
-      if (hitTestResults.length > 0) {
-        const hitResult = hitTestResults[0];
-        if (hitResult.createAnchor) {
-          hitResult.createAnchor().then((anchor) => {
-            this.anchor = anchor;
-            console.log("WebXR Anchor created successfully!");
-          }).catch((err) => {
-            console.warn("Failed to create WebXR Anchor:", err);
-          });
-        }
-      }
-      this.shouldCreateAnchor = false;
-    }
+    // *** NO model position/scale/rotation updates here — ever ***
 
     // Render scene
     this.renderer.render(this.scene, this.camera);
   }
 
+  // ─── Placement (onSelect) ────────────────────────────────────────────────────
+
   onSelect() {
     if (this.isPlaced || this.isLoading) return;
 
-    // Block placement if space requirements are not met
     if (!this.isSpaceValid) {
       if (this.onError) {
-        this.onError(this.lastSpaceCheckReason || "Not enough space to place machine.");
+        this.onError(
+          this.lastSpaceCheckReason || "Not enough space to place machine."
+        );
       }
       return;
     }
@@ -206,140 +207,183 @@ export class ARApp {
     this.isLoading = true;
     this.reticle.visible = false;
     if (this.onSpaceStatus) {
-      this.onSpaceStatus(false, "Loading machine model...");
+      this.onSpaceStatus(false, "Placing machine...");
     }
 
-    // Decompose the reticle matrix to capture placement location
-    const position = new THREE.Vector3();
-    const quaternion = new THREE.Quaternion();
-    const scale = new THREE.Vector3();
-    this.reticle.matrix.decompose(position, quaternion, scale);
+    // Capture placement transform from the reticle AT THIS MOMENT
+    const placementPos = new THREE.Vector3();
+    const placementQuat = new THREE.Quaternion();
+    const placementScale = new THREE.Vector3();
+    this.reticle.matrix.decompose(placementPos, placementQuat, placementScale);
 
-    this.shouldCreateAnchor = true; // Signal visual anchor creation in tick loop
+    // Place the model
+    const doPlace = (model) => {
+      this.placedModel = model;
+
+      // 1. Add to scene at origin to compute bounding box
+      this.scene.add(this.placedModel);
+      this.placedModel.scale.set(1, 1, 1);
+      this.placedModel.rotation.set(0, 0, 0);
+      this.placedModel.position.set(0, 0, 0);
+      this.placedModel.updateMatrixWorld(true);
+
+      // 2. Measure the visual bounding box
+      const box = getVisualBoundingBox(this.placedModel);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+
+      // 3. Uniform scale to match real-world height (mm → meters)
+      const targetHeight = this.machineData.height / 1000;
+      let scaleFactor = 1.0;
+      if (size.y > 0.001) {
+        scaleFactor = targetHeight / size.y;
+      }
+
+      // 4. Apply scale ONCE
+      this.placedModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
+      this.placedModel.updateMatrixWorld(true);
+
+      // 5. Get bottom offset after scaling
+      const scaledBox = getVisualBoundingBox(this.placedModel);
+
+      // 6. Position ONCE — sit bottom of model on the floor hit point
+      this.placedModel.position.copy(placementPos);
+      this.placedModel.position.y -= scaledBox.min.y;
+
+      // 7. Orient ONCE — use the reticle's yaw
+      this.placedModel.quaternion.copy(placementQuat);
+
+      // 8. Compute final world matrix
+      this.placedModel.updateMatrixWorld(true);
+
+      // 9. FREEZE — never touch this model's transform again
+      this.placedModel.matrixAutoUpdate = false;
+      this.placedModel.traverse((child) => {
+        child.matrixAutoUpdate = false;
+      });
+
+      // 10. Position directional light near the model
+      this.dirLight.target = this.placedModel;
+      this.dirLight.position.set(
+        placementPos.x + 1.5,
+        placementPos.y + 4.0,
+        placementPos.z + 1.5
+      );
+
+      // 11. Done
+      this.isPlaced = true;
+      this.isLoading = false;
+
+      if (this.onSpaceStatus) {
+        this.onSpaceStatus(true, "");
+      }
+      if (this.onPlaced) {
+        this.onPlaced();
+      }
+    };
+
+    // Use preloaded model if ready, otherwise wait
+    if (this.isPreloaded && this.preloadedModel) {
+      doPlace(this.preloadedModel);
+    } else if (this.preLoadError) {
+      this.isLoading = false;
+      if (this.onError) {
+        this.onError(
+          "Failed to load model: " +
+            (this.preLoadError.message || this.preLoadError)
+        );
+      }
+    } else {
+      // Model still downloading — poll until ready
+      if (this.onSpaceStatus) {
+        this.onSpaceStatus(false, "Downloading machine model...");
+      }
+      const poll = setInterval(() => {
+        if (this.isPreloaded && this.preloadedModel) {
+          clearInterval(poll);
+          doPlace(this.preloadedModel);
+        } else if (this.preLoadError) {
+          clearInterval(poll);
+          this.isLoading = false;
+          if (this.onError) {
+            this.onError(
+              "Failed to load model: " +
+                (this.preLoadError.message || this.preLoadError)
+            );
+          }
+        }
+      }, 100);
+    }
+  }
+
+  // ─── Preloading ──────────────────────────────────────────────────────────────
+
+  _startPreload() {
+    this.preloadedModel = null;
+    this.preLoadError = null;
+    this.isPreloaded = false;
 
     loadMachine(
       this.machineData.model,
       (model) => {
-        this.placedModel = model;
-
-        // Add to scene first so that world matrices can be computed correctly
-        this.scene.add(this.placedModel);
-
-        // Reset scale/rotation/position to calculate true original dimensions
-        this.placedModel.scale.set(1, 1, 1);
-        this.placedModel.rotation.set(0, 0, 0);
-        this.placedModel.position.set(0, 0, 0);
-        this.placedModel.updateMatrixWorld(true);
-
-        const box = getVisualBoundingBox(this.placedModel);
-        const size = new THREE.Vector3();
-        box.getSize(size);
-
-        // Calculate uniform scale factor to match the real-world height (in meters) without distortion
-        const targetHeight = this.machineData.height / 1000;
-        let scaleFactor = 1.0;
-        if (size.y > 0.001) {
-          scaleFactor = targetHeight / size.y;
-        }
-
-        this.placedModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
-        this.placedModel.updateMatrixWorld(true);
-
-        // Calculate bounding box again after scaling to find the bottom offset relative to the pivot
-        const scaledBox = getVisualBoundingBox(this.placedModel);
-        this.modelLocalMinY = scaledBox.min.y;
-
-        // Position model exactly on the floor hit point
-        this.placedModel.position.copy(position);
-        this.placedModel.position.y -= scaledBox.min.y;
-        
-        // Orient the model flat on the surface using the reticle's yaw quaternion
-        this.placedModel.quaternion.copy(quaternion);
-        this.placedModel.updateMatrixWorld(true);
-
-        // Freeze the transform completely!
-        this.placedModel.matrixAutoUpdate = false;
-
-        // Place shadow plane exactly under the model
-        this.shadowPlane.position.copy(position);
-        this.shadowPlane.position.y += 0.001; // Prevent z-fighting
-        this.shadowPlane.visible = true;
-
-        // Ground base is disabled per user request
-
-        // Position shadow-casting light target onto placed model
-        this.dirLight.target = this.placedModel;
-        this.dirLight.position.set(position.x + 1.5, position.y + 4.0, position.z + 1.5);
-
-        this.isPlaced = true;
-        this.isLoading = false;
-
-        if (this.onSpaceStatus) {
-          this.onSpaceStatus(true, ""); // Clear messages
-        }
-        if (this.onPlaced) {
-          this.onPlaced();
-        }
+        this.preloadedModel = model;
+        this.isPreloaded = true;
+        console.log("Machine model preloaded successfully.");
       },
       (progress) => {
-        if (this.onLoadingProgress) {
-          this.onLoadingProgress(progress);
+        if (this.onLoadingProgress && !this.isPlaced) {
+          this.onLoadingProgress(Math.round(progress));
         }
       },
       (err) => {
-        this.isLoading = false;
-        this.reticle.visible = true; // Show reticle to allow trying again
-        if (this.onError) {
-          this.onError("Failed to load model: " + (err.message || err));
-        }
+        this.preLoadError = err;
+        console.error("Failed to preload machine model:", err);
       }
     );
   }
+
+  // ─── Remove Machine ─────────────────────────────────────────────────────────
 
   removeMachine() {
     if (!this.isPlaced || !this.placedModel) return;
 
     this.scene.remove(this.placedModel);
 
-    // Prevent memory leaks: recursively dispose geometry, materials, and textures
+    // Dispose geometry, materials, and textures
     this.placedModel.traverse((child) => {
       if (child.isMesh) {
         if (child.geometry) child.geometry.dispose();
         if (child.material) {
-          if (Array.isArray(child.material)) {
-            child.material.forEach((mat) => {
-              this.disposeMaterial(mat);
-            });
-          } else {
-            this.disposeMaterial(child.material);
-          }
+          const mats = Array.isArray(child.material)
+            ? child.material
+            : [child.material];
+          mats.forEach((mat) => {
+            for (const key of Object.keys(mat)) {
+              const prop = mat[key];
+              if (prop && typeof prop.dispose === "function" && prop.isTexture) {
+                prop.dispose();
+              }
+            }
+            mat.dispose();
+          });
         }
       }
     });
 
     this.placedModel = null;
-    this.shadowPlane.visible = false;
-    this.anchor = null;
-    this.shouldCreateAnchor = false;
     this.isPlaced = false;
     this.isSpaceValid = false;
     this.lastSpaceCheckReason = "Scanning for flat surface...";
+
+    // Re-preload for next placement
+    this._startPreload();
 
     if (this.onRemoved) {
       this.onRemoved();
     }
   }
 
-  disposeMaterial(material) {
-    material.dispose();
-    // Dispose of any textures bound to maps
-    for (const key of Object.keys(material)) {
-      const prop = material[key];
-      if (prop && typeof prop.dispose === "function" && prop.isTexture) {
-        prop.dispose();
-      }
-    }
-  }
+  // ─── Utility ─────────────────────────────────────────────────────────────────
 
   onWindowResize() {
     if (this.camera && this.renderer) {
@@ -350,59 +394,54 @@ export class ARApp {
   }
 
   destroy() {
-    // 1. Unbind window event
     window.removeEventListener("resize", this.onWindowResizeBind);
 
-    // 2. Clean up XR Event listeners and end session
     if (this.session) {
       this.session.removeEventListener("select", this.onSelectBind);
-      const activeSession = this.session;
-      this.session = null; // Prevent loop trigger in listeners
-      activeSession.end().catch((err) => {
-        console.warn("Session already ended or failed to close cleanly:", err);
-      });
+      const s = this.session;
+      this.session = null;
+      s.end().catch(() => {});
     }
 
-    // 3. Stop Animation loop
     if (this.renderer) {
       this.renderer.setAnimationLoop(null);
     }
 
-    // 4. Remove and clean up the placed machine
     if (this.placedModel) {
       this.removeMachine();
     }
 
-    // 5. Clean up other scene assets
     if (this.scene) {
       this.scene.traverse((child) => {
         if (child.isMesh) {
           if (child.geometry) child.geometry.dispose();
           if (child.material) {
-            if (Array.isArray(child.material)) {
-              child.material.forEach((mat) => this.disposeMaterial(mat));
-            } else {
-              this.disposeMaterial(child.material);
-            }
+            const mats = Array.isArray(child.material)
+              ? child.material
+              : [child.material];
+            mats.forEach((m) => m.dispose());
           }
         }
       });
     }
 
-    // 6. Dispose WebGLRenderer and clean DOM
     if (this.renderer) {
       this.renderer.dispose();
-      if (this.container && this.renderer.domElement.parentNode === this.container) {
+      if (
+        this.container &&
+        this.renderer.domElement.parentNode === this.container
+      ) {
         this.container.removeChild(this.renderer.domElement);
       }
     }
 
-    // 7. Fire Removed callback to clear React UI states
     if (this.onRemoved) {
       this.onRemoved();
     }
   }
 }
+
+// ─── Helper: Visual Bounding Box ─────────────────────────────────────────────
 
 function getVisualBoundingBox(object) {
   const box = new THREE.Box3();
@@ -410,7 +449,7 @@ function getVisualBoundingBox(object) {
 
   object.traverse((child) => {
     if (child.isMesh) {
-      const name = child.name.toLowerCase();
+      const name = (child.name || "").toLowerCase();
       if (
         name.includes("helper") ||
         name.includes("collider") ||
@@ -423,16 +462,17 @@ function getVisualBoundingBox(object) {
       }
 
       if (child.material) {
-        const mats = Array.isArray(child.material) ? child.material : [child.material];
-        const isInvisible = mats.every((m) => m.visible === false || m.opacity === 0);
-        if (isInvisible) return;
+        const mats = Array.isArray(child.material)
+          ? child.material
+          : [child.material];
+        if (mats.every((m) => m.visible === false || m.opacity === 0)) return;
       }
 
       if (!child.geometry) return;
       if (!child.geometry.boundingBox) {
         child.geometry.computeBoundingBox();
       }
-      
+
       const localBox = child.geometry.boundingBox.clone();
       child.updateWorldMatrix(true, false);
       localBox.applyMatrix4(child.matrixWorld);
