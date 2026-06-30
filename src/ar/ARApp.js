@@ -188,24 +188,6 @@ export class ARApp {
       this.shouldCreateAnchor = false;
     }
 
-    // 2. Keep the placed model locked to the WebXR Anchor if available
-    if (this.isPlaced && this.placedModel && this.anchor && referenceSpace) {
-      const anchorPose = frame.getPose(this.anchor.anchorSpace, referenceSpace);
-      if (anchorPose) {
-        const matrix = new THREE.Matrix4().fromArray(anchorPose.transform.matrix);
-        const position = new THREE.Vector3();
-        const quaternion = new THREE.Quaternion();
-        const scale = new THREE.Vector3();
-        matrix.decompose(position, quaternion, scale);
-
-        // Update placed model position to sit exactly on the floor hit point
-        this.placedModel.position.copy(position);
-        this.placedModel.position.y -= this.modelLocalMinY;
-        this.placedModel.quaternion.copy(quaternion);
-        this.placedModel.updateMatrixWorld(true);
-      }
-    }
-
     // Render scene
     this.renderer.render(this.scene, this.camera);
   }
@@ -446,6 +428,7 @@ function getVisualBoundingBox(object) {
         if (isInvisible) return;
       }
 
+      if (!child.geometry) return;
       if (!child.geometry.boundingBox) {
         child.geometry.computeBoundingBox();
       }
