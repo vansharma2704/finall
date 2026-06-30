@@ -64,7 +64,6 @@ export class ARApp {
       // 4. Start WebXR AR Session
       const sessionInit = {
         requiredFeatures: ["hit-test", "local"],
-        optionalFeatures: ["local-floor"],
       };
 
       this.session = await startAR(this.renderer, sessionInit);
@@ -214,12 +213,20 @@ export class ARApp {
         const size = new THREE.Vector3();
         box.getSize(size);
 
-               const targetHeight = this.machineData.height / 1000; // in meters
-        let scaleFactor = 1.0;
-        if (size.y > 0) {
-          scaleFactor = targetHeight / size.y;
-        }
-        this.placedModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
+        // Calculate exact non-uniform scaling to match target dimensions in meters
+        const targetWidth = this.machineData.width / 1000;
+        const targetHeight = this.machineData.height / 1000;
+        const targetDepth = this.machineData.depth / 1000;
+
+        let scaleX = 1.0;
+        let scaleY = 1.0;
+        let scaleZ = 1.0;
+
+        if (size.x > 0) scaleX = targetWidth / size.x;
+        if (size.y > 0) scaleY = targetHeight / size.y;
+        if (size.z > 0) scaleZ = targetDepth / size.z;
+
+        this.placedModel.scale.set(scaleX, scaleY, scaleZ);
 
         // Calculate bounding box again after scaling to find the bottom offset relative to the pivot
         const scaledBox = new THREE.Box3().setFromObject(this.placedModel);

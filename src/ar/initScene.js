@@ -9,6 +9,7 @@ export function initScene(container) {
     0.01,
     20
   );
+  scene.add(camera);
 
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -19,7 +20,7 @@ export function initScene(container) {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Limit ratio to 2 for performance
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.xr.enabled = true;
-  renderer.xr.setReferenceSpaceType("local-floor");
+  renderer.xr.setReferenceSpaceType("local");
 
   // Shadow Map Settings
   renderer.shadowMap.enabled = true;
