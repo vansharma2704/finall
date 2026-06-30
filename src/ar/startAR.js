@@ -14,5 +14,21 @@ export async function startAR(renderer, sessionInit = {}) {
   // Set the session on Three.js WebXRManager
   await renderer.xr.setSession(session);
 
+  // Retrieve and set reference space with fallback to ensure stationary tracking
+  let referenceSpace = null;
+  try {
+    referenceSpace = await session.requestReferenceSpace("local-floor");
+  } catch (e) {
+    try {
+      referenceSpace = await session.requestReferenceSpace("local");
+    } catch (e2) {
+      referenceSpace = await session.requestReferenceSpace("viewer");
+    }
+  }
+
+  if (referenceSpace) {
+    renderer.xr.setReferenceSpace(referenceSpace);
+  }
+
   return session;
 }

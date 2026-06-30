@@ -61,8 +61,8 @@ export class ARApp {
 
       // 4. Start WebXR AR Session
       const sessionInit = {
-        requiredFeatures: ["hit-test"],
-        optionalFeatures: ["local-floor", "local"],
+        requiredFeatures: ["hit-test", "local"],
+        optionalFeatures: ["local-floor"],
       };
 
       this.session = await startAR(this.renderer, sessionInit);
@@ -203,15 +203,20 @@ export class ARApp {
         const size = new THREE.Vector3();
         box.getSize(size);
 
-        const targetHeight = this.machineData.height / 1000; // in meters
+               const targetHeight = this.machineData.height / 1000; // in meters
         let scaleFactor = 1.0;
         if (size.y > 0) {
           scaleFactor = targetHeight / size.y;
         }
         this.placedModel.scale.set(scaleFactor, scaleFactor, scaleFactor);
 
+        // Calculate bounding box again after scaling to find the bottom offset relative to the pivot
+        const scaledBox = new THREE.Box3().setFromObject(this.placedModel);
+
         // Position model exactly on the floor hit point
         this.placedModel.position.copy(position);
+        // Adjust Y so the bottom of the model rests exactly on the floor
+        this.placedModel.position.y -= scaledBox.min.y;
 
         // Orient model to face the camera (user) horizontally
         const xrCamera = this.renderer.xr.getCamera();
